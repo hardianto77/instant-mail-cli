@@ -445,10 +445,86 @@ def menu():
         else: continue
         pause()
 
+def wait_for_otp(mb, timeout=120, interval=3):
+    t0 = time.time()
+    seen = set()
+    while time.time() - t0 < timeout:
+        try:
+            msgs = fetch_messages(mb)
+            for m in msgs:
+                if m.get("id") not in seen:
+                    seen.add(m.get("id"))
+                    body = m.get("text") or strip_html(m.get("html") or "")
+                    best, allc = extract_otp((m.get("subject") or "") + "\n" + body)
+                    if best:
+                        return {"otp": best, "candidates": allc, "from": m.get("from"), "subject": m.get("subject")}
+        except Exception:
+            pass
+        time.sleep(interval)
+    return None
+
 if __name__ == "__main__":
     try:
-        if "--test" in sys.argv:
+        import argparse
+        parser = argparse.ArgumentParser(description="Instant Mail CLI & OTP Resolver", add_help=False)
+        parser.add_argument("--test", action="store_true", help="Run self-test")
+        parser.add_argument("--gen", choices=["gmail", "hd", "tmio", "tmorg"], help="Generate email")
+        parser.add_argument("--wait-otp", type=int, nargs="?", const=120, default=None, help="Poll inbox for OTP")
+        parser.add_argument("--inbox", action="store_true", help="Fetch current messages")
+        parser.add_argument("--raw", action="store_true", help="Print raw email or OTP only")
+        parser.add_argument("--json", action="store_true", help="Print JSON output")
+        parser.add_argument("-h", "--help", action="store_true", help="Show help")
+        args, _ = parser.parse_known_args()
+
+        if args.help:
+            parser.print_help()
+            sys.exit(0)
+        elif args.test:
             do_test()
+        elif args.gen:
+            st = load_state()
+            fns = {"gmail": gen_gmail, "hd": gen_hd, "tmio": gen_tmio, "tmorg": gen_tmorg}
+            mb = fns[args.gen]()
+            mb["ts"] = int(time.time())
+            st["current"] = mb
+            st.setdefault("history", []).insert(0, mb)
+            st["history"] = st["history"][:20]
+            save_state(st)
+            if args.raw:
+                print(mb["email"])
+            elif args.json:
+                print(json.dumps(mb, indent=2))
+            else:
+                ok(f"Generated ({mb['service']}): {mb['email']}")
+        elif args.wait_otp is not None:
+            st = load_state()
+            cur = st.get("current")
+            if not cur:
+                if args.json: print(json.dumps({"error": "No current mailbox. Run --gen first."})); sys.exit(1)
+                bad("No current mailbox. Run --gen first."); sys.exit(1)
+            res = wait_for_otp(cur, timeout=args.wait_otp)
+            if res:
+                if args.raw:
+                    print(res["otp"])
+                elif args.json:
+                    print(json.dumps(res, indent=2))
+                else:
+                    ok(f"OTP Received: {res['otp']} (From: {res['from']})")
+            else:
+                if args.json: print(json.dumps({"error": "Timeout waiting for OTP"})); sys.exit(1)
+                bad("Timeout waiting for OTP"); sys.exit(1)
+        elif args.inbox:
+            st = load_state()
+            cur = st.get("current")
+            if not cur:
+                bad("No current mailbox. Run --gen first."); sys.exit(1)
+            msgs = fetch_messages(cur)
+            if args.json:
+                print(json.dumps(msgs, indent=2))
+            else:
+                ok(f"Found {len(msgs)} message(s)")
+                for m in msgs:
+                    print(f"- From: {m['from']} | Subj: {m['subject']}")
         else:
             menu()
     except KeyboardInterrupt:
